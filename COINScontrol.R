@@ -1,0 +1,287 @@
+rm(list=ls()); graphics.off()
+
+# Load packages
+library(rgeos)
+library(rgdal)
+library(raster)
+library(rts)
+library(maptools)   # for shp files
+library(Matrix)     # for sparse matrices
+library(pracma)     # for repmat
+library(ggplot2)
+library(plyr)
+
+dx <- 20
+
+out_name <- paste("outputcontrol",dx,sep="")
+
+
+suit_name <- paste("data/HS_CVdx",dx,".tif",sep="")
+presen_path <- paste("data/output",dx,"/density_dx",dx,"_2014.tif",sep="")            
+domain_path <- "data/boundaryPA.shp"
+param_path  <- "data/parameters.csv"
+uds_path    <- "data/land_cover.shp"
+
+# Read inputs files
+param    <- read.csv(param_path,sep=';',header=FALSE)
+pres     <- raster(presen_path)
+suppressWarnings( domain   <- readShapeSpatial(domain_path,proj4string=CRS("+proj=longlat")) )
+
+
+# Parameters of the model
+par_values <- as.character(param$V2)
+D      <- as.numeric(par_values[1])
+r      <- as.numeric(par_values[2])
+c      <- as.numeric(par_values[3])
+mu     <- as.numeric(par_values[4])
+h      <- as.numeric(par_values[5])
+nu     <- as.numeric(par_values[6])
+omega  <- as.numeric(par_values[7])
+delta  <- as.numeric(par_values[8])
+B      <- as.numeric(par_values[9])
+#T      <- as.numeric(par_values[10])
+T=5
+
+date0 <- as.Date("2014/7/1")
+
+k <-1; q<- 2;
+m <- 2*q-1; alpha <- c*m/(B^m)
+
+# Numerical grid
+
+dxkm <- dx*1e-3
+
+
+
+yr<-2014
+
+print("Creating numerical grid")
+rasterOptions(chunksize=1e+4, maxmemory=1e+4, progress='text', overwrite=TRUE)
+#pres_num <- raster::aggregate(pres, fact=dx/xres(pres), fun=mean, extend=FALSE)
+#pres_num <- pres
+
+# Suitability
+
+   HSI_rast <- raster(suit_name)
+   HSI <- getValues(HSI_rast,format="matrix")
+   HSI <- t(HSI)
+   HSI <- HSI[,ncol(HSI):1]
+   HSI <- c(HSI)
+
+#pres_num <- pres * HSI_rast
+pres_num <- pres 
+
+# Tolerance settings
+tolFB    <- 1e-6
+tolsolve <- 1e-15
+itmax    <- 500
+
+# Select grid points where control will be applied
+#control <- par_values[12]
+control <- "Y"
+temp_rast <- rasterize(domain,pres_num)
+temp_mat <- getValues(temp_rast,format="matrix")
+temp_mat <- t(temp_mat)
+temp_mat <- temp_mat[,ncol(temp_mat):1]
+temp_vec <- c(temp_mat)
+if (control == "Y") {
+          ind_in  <- !is.na(temp_vec)
+          name_flag <- "with_control"
+} else {
+          ind_in  <- rep(FALSE,length(temp_vec))
+          name_flag <- "without_control"
+          itmax=1
+}
+
+#simulazioni dal 2014 al 2019
+#windows()
+#val_pol <- getValues(temp_rast)
+#val<-getValues(pres_num)
+#val1<-val
+#val1[!is.na(val_pol)] <- 0
+#pres_num<-setValues(pres_num,val1)
+#plot(pres_num)
+#lines(domain,col=2)
+
+
+# Time settings
+
+dt <- 0.05
+int <- 1/dt
+
+# Calculate some values
+Nx <- dim(pres_num)[2]
+Ny <- dim(pres_num)[1]
+n <- Nx*Ny
+Nt <- round(T/dt) +1
+t <- ((0:(Nt-1)))*dt
+elo <- exp(-delta*dt)
+
+
+### Assemby matrices
+#print("Assemby matrices")
+load(paste("L",dx,".RData",sep=""))
+
+## Matrix L (without 1/dxkm^2 factor)
+#L = bandSparse(n,n, k=c(0,Nx),diagonals=list(4+numeric(n),-1+numeric(Nx*(Ny-1))), symmetric = T)
+## S
+#L[1,1]=3; L[1,2]=-3/2; L[Nx,Nx]=6; L[Nx,Nx-1]=-3
+#L[cbind(2:(Nx-1),1:(Nx-2))]=-1;
+#L[cbind(2:(Nx-1),3:Nx)]=-1;
+##Z
+#L[(Ny-1)*Nx+1,(Ny-1)*Nx+1]=6; L[n,n]=3
+#L[(Ny-1)*Nx+1,(Ny-1)*Nx+2]=-3; L[n,n-1]=-3/2
+#L[cbind(((Ny-1)*Nx+2):(Nx*Ny-1),((Ny-1)*Nx+1):(n-2))]=-1
+#L[cbind(((Ny-1)*Nx+2):(Nx*Ny-1),((Ny-1)*Nx+3):(n))]=-1
+##T
+#L[1,Nx+1]=-3/2; L[Nx,2*Nx]=-3
+#L[cbind(2:(Nx-1),(Nx+2):(2*Nx-1))]=-2
+##Y
+#L[(Ny-1)*Nx+1,(Ny-2)*Nx+1]=-3; L[n,(Ny-1)*Nx]=-3/2
+#L[cbind( ((Ny-1)*Nx+2):(n-1), ((Ny-2)*Nx+2):((Ny-1)*Nx-1))]=-2
+##X
+#ind1 <- ind2 <- matrix(nrow=0,ncol=2)
+#for (j in 1:(Ny-2)) {
+#    ind1 <- rbind(ind1, cbind((j*Nx+2):((j+1)*Nx-1),(j*Nx+1):((j+1)*Nx-2)),cbind((j*Nx+2):((j+1)*Nx-1),(j*Nx+3):((j+1)*Nx)) )
+#    ind2 <- rbind(ind2, c(j*Nx+1,j*Nx+2), c((j+1)*Nx,(j+1)*Nx-1))
+#}
+#L[ind1]=-1; L[ind2]=-2
+
+# Matrix B
+Bmat <- bandSparse(n,n, k=0,diagonals=list(1+numeric(n))) + dt/(dxkm^2)*D*L
+
+# Initial conditions
+U0 <- getValues(pres_num,format="matrix")
+U0 <- t(U0)
+U0 <- U0[,ncol(U0):1]
+u0 <- c(U0)
+
+vT <- nu*exp(delta*T) #+numeric(n)
+
+# Time stepping procedure
+
+print("Forward-backward")
+
+u <- v <- Evec <- numeric(n)
+uout <- uold <- repmat(matrix(u0,nrow=n),1,Nt)
+vout <- vold <- repmat(matrix(vT,nrow=n),1,Nt)
+vout[,Nt] <- vT; vold[,Nt] <- vT
+Eout <- matrix(0,nrow=n,ncol=Nt)
+vl1  <- repmat(matrix(vT,nrow=n),1,Nt-1)
+
+STOP=0; it=0;
+
+while (STOP==0)   {
+    it=it+1;
+
+    # Forward
+    u = u0
+
+    for (nt in 2:Nt) {
+
+        v=vl1[,nt-1];
+        Evec[ind_in]=(q/2/alpha*( sqrt( 1+4*alpha*mu*u[ind_in]*v[ind_in]/q^2./(1+h*mu*u[ind_in]) ) -1))^(1/(q-1))
+
+        Fun =  r*HSI*u-r*u^2/k - mu*u*Evec/(1+h*mu*u)
+        u = u + dt*Fun
+
+        u <- solve(Bmat,u,sparse=TRUE,tol=tolsolve)
+
+        if (min(u)<0) {
+           disp(paste('u has negative elements, nt=',nt,'it=',it))
+        }
+
+        uout[,nt] <- as.numeric(u)
+    }
+
+    # Backward
+    v = vout[,Nt]
+    for (nt in seq(Nt-1,1,by=-1)) {
+
+        u=uout[,nt]
+        v <- solve(Bmat,v,sparse=TRUE,tol=tolsolve)
+
+        if (min(v)<0) {
+           disp('v has negative elements')
+        }
+
+        vl1[,nt]=as.numeric(v)
+        Evec[ind_in]=(q/2/alpha*(sqrt(1+4*alpha*mu*u[ind_in]*v[ind_in]/q^2./(1+h*mu*u[ind_in]))-1))^(1/(q-1))
+
+        G= omega+r*HSI*v-2*r/k*u*v-mu*v*Evec/(1+h*mu*u)^2
+        v =elo*(v+dt*G)
+        vout[,nt]=as.numeric(v)
+    }
+
+    Eout[ind_in,]=( q/2/alpha*(sqrt(1+4*alpha*mu*uout[ind_in,]*vout[ind_in,]/q^2/(1+h*mu*uout[ind_in,]))-1) )^(1/(q-1))
+
+    err_u=norm(uold-uout,type="1"); norm_u=norm(uout,type="1")
+    err_v=norm(vold-vout,type="1"); norm_v=norm(vout,type="1")
+    STOP= min(tolFB*norm_u-err_u,tolFB*norm_v-err_v) >0 | it==itmax
+    print( paste('it=', it, '  rel.err=', max(err_u/norm_u,err_v/norm_v)) )
+
+    uold=uout
+    vold=vout
+
+}
+
+if (min(tolFB*norm_u-err_u,tolFB*norm_v-err_v) >0)  { print(paste("Tolerance achieved in",it,"iterates")) } else { print(paste("Tolerance not achieved in",itmax,"iterates")) }
+
+### Output
+
+dates <- seq(date0, by = "year", length.out = T+1)
+
+dir.create(paste("data/",out_name,sep="") )
+#writeRaster(pres_num,paste("data/",out_name,"/","density","_",yr,sep=""),format="GTiff", overwrite=TRUE)
+
+K<-5e+5
+A<-dx^2*1e-6
+KA<-K*A
+
+#ab_rast <- pres_num
+
+for (s in seq(1,Nt,by=int)) {
+
+    us <- uout[,s]
+    Us <- matrix(us,ncol=Ny)
+    Us <- Us[,ncol(Us):1]
+    Us <- t(Us)
+    dens <- setValues(pres_num, Us, format='matrix')
+    disp(yr)
+    windows()
+    pres <-dens*KA
+    plot(pres)
+    lines(domain,col=2)
+    title(paste(yr))              
+    writeRaster(pres,paste("data/",out_name,"/","presence_dx",dx,"_",yr,sep=""),format="GTiff", overwrite=TRUE)
+    writeRaster(dens,paste("data/",out_name,"/","density_dx",dx,"_",yr,sep=""),format="GTiff", overwrite=TRUE)
+    yr<-yr+1
+    #ab_rast <- stack(ab_rast, dens)
+}
+
+#writeRaster(pres,paste("data/",out_name,"/","density","_",yr-1,sep=""),format="GTiff", overwrite=TRUE)
+#ab_rts <- rts(ab_rast, dates)
+#write.rts(ab_rts,"data/density",overwrite=TRUE)
+
+yr<-2014
+e0 <- Eout[,1]
+E0 <- matrix(e0,ncol=Ny)
+E0 <- E0[,ncol(E0):1]
+E0 <- t(E0)
+eff_rast <- setValues(pres_num, E0, format='matrix')
+for (s in seq((int+1),Nt,by=int)) {
+    e0 <- Eout[,s]
+    E0 <- matrix(e0,ncol=Ny)
+    E0 <- E0[,ncol(E0):1]
+    E0 <- t(E0)
+    eff <- setValues(pres_num, E0, format='matrix')
+    eff <- eff*A
+    #eff_rast <- stack(eff_rast, eff)
+    windows()
+    plot(eff)
+    lines(domain,col=2)
+    yr<-yr+1
+    writeRaster(eff,paste("data/",out_name,"/","effort_dx",dx,"_",yr,sep=""),format="GTiff", overwrite=TRUE)
+}
+#eff_rts <- rts(eff_rast,dates)
+#write.rts(eff_rts,"data/effort",overwrite=TRUE)
