@@ -1,0 +1,12 @@
+D;5.21E-07
+r;1.92E+00
+c;1.00E+00
+mu;2.00E+00
+h;1.37E+00
+nu;3.41E+02
+omega;3.41E+02
+delta;4.40E-03
+B;8.86E-01
+T;18
+Do you want to generate the suitability map? ;Y
+Do you want to run the model with control? ;N
